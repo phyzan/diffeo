@@ -27,10 +27,10 @@ struct Ax{
     static constexpr size_t Num = N;
 };
 
-// To name an index: Idx<'i'> i; Idx<'j'> j; A(i, j) = B(j, i);
-template<char Label>
+// An index and its id: Idx<0> i; Idx<1> j; A(i, j) = B(j, i); (any distinct ids)
+template<size_t Label>
 struct Idx{
-    static constexpr char Name = Label;
+    static constexpr size_t Id = Label;
 };
 
 
@@ -41,7 +41,7 @@ class Tensor; // holds a fastor tensor
 namespace detail{
 
 struct NamedIdx{
-    char name;
+    size_t id;
     Loc type;
     size_t range;
 
@@ -52,13 +52,13 @@ template<size_t Rank>
 using FreeIdxColl = std::array<NamedIdx, Rank>;
 
 template<size_t Size>
-using ContractedIdxColl = std::array<char, Size>;
+using ContractedIdxColl = std::array<size_t, Size>;
 
 // Created temporarily when doing SomeTensor(I, J, ...),
-// from each Ax of the tensor and each name of I, J, ...
-template<char Label, Loc Type, size_t N>
+// from each Ax of the tensor and the id of each of I, J, ...
+template<size_t Label, Loc Type, size_t N>
 struct AxisProxy : Ax<Type, N>{
-    static constexpr char Name = Label;
+    static constexpr size_t Id = Label;
 };
 
 template<typename... AxProx>
@@ -88,13 +88,13 @@ struct IndexCollection{
 
     static constexpr size_t Count = sizeof...(AxProx);
     static constexpr std::array<NamedIdx, Count> IdxList{
-        NamedIdx{.name = AxProx::Name, .type = AxProx::idx_type, .range = AxProx::Num}...};
+        NamedIdx{.id = AxProx::Id, .type = AxProx::idx_type, .range = AxProx::Num}...};
 
     static constexpr bool valid_einsum(){
         for (size_t i = 0; i + 1 < Count; ++i){
             size_t rep_count = 1;
             for (size_t j = i + 1; j < Count; ++j){
-                if (IdxList[i].name == IdxList[j].name){
+                if (IdxList[i].id == IdxList[j].id){
                     // Einstein summation rules
                     bool is_bad = (++rep_count == 3);
                     is_bad = is_bad || (IdxList[i].type == IdxList[j].type);
@@ -111,10 +111,10 @@ struct IndexCollection{
     static_assert(valid_einsum(), "Operation does not satisfy the einstein summation rules: a label can appear at most twice, "
                                   "and a repeated label must be once Up and once Dn, with the same range");
 
-    static constexpr size_t occurrences(char name){
+    static constexpr size_t occurrences(size_t id){
         size_t res = 0;
         for (const NamedIdx& idx : IdxList){
-            if (idx.name == name){
+            if (idx.id == id){
                 ++res;
             }
         }
@@ -123,11 +123,11 @@ struct IndexCollection{
 
     // Whether IdxList[i] is the first of a pair of contracted indices
     static constexpr bool opens_pair(size_t i){
-        if (occurrences(IdxList[i].name) != 2){
+        if (occurrences(IdxList[i].id) != 2){
             return false;
         }
         for (size_t j = 0; j < i; ++j){
-            if (IdxList[j].name == IdxList[i].name){
+            if (IdxList[j].id == IdxList[i].id){
                 return false;
             }
         }
@@ -149,7 +149,7 @@ struct IndexCollection{
     static constexpr size_t free_count(){
         size_t res = 0;
         for (const NamedIdx& idx : IdxList){
-            if (occurrences(idx.name) == 1){
+            if (occurrences(idx.id) == 1){
                 ++res;
             }
         }
@@ -164,7 +164,7 @@ struct IndexCollection{
         size_t k = 0;
         for (size_t i = 0; i < Count; ++i){
             if (opens_pair(i)){
-                res[k++] = IdxList[i].name;
+                res[k++] = IdxList[i].id;
             }
         }
         return res;
@@ -174,7 +174,7 @@ struct IndexCollection{
         FreeIdxColl<NFree> res{};
         size_t k = 0;
         for (const NamedIdx& idx : IdxList){
-            if (occurrences(idx.name) == 1){
+            if (occurrences(idx.id) == 1){
                 res[k++] = idx;
             }
         }
@@ -186,7 +186,7 @@ struct IndexCollection{
     // returns a IndexCollection with just the free indices
     static constexpr auto contracted(){
         return []<size_t... I>(std::index_sequence<I...>){
-            return IndexCollection<AxisProxy<FreeList[I].name, FreeList[I].type, FreeList[I].range>...>{};
+            return IndexCollection<AxisProxy<FreeList[I].id, FreeList[I].type, FreeList[I].range>...>{};
         }(std::make_index_sequence<NFree>{});
     }
 
@@ -246,14 +246,25 @@ transposed into the order of the assigned tensor if needed. A sum inside a produ
 (A + B) * C, is evaluated first into a temporary, which is then one of the factors.
 */
 
-// The labels are used as Fastor index values: A(mu, nu) -> Fastor::Index<'m', 'n'>
-template<typename IC>
+// The Fastor::Index of the labels of IC. Fastor converts index values to int, so it doesn't get the
+// labels themselves but their numbers: the position of each label's first occurrence in U, which
+// contains the labels of IC (by default U is IC). For A(mu, a) * B(a, nu), with U = {mu, a, a, nu}:
+// A -> Fastor::Index<0, 1>, B -> Fastor::Index<1, 3>
+template<typename IC, typename U = IC>
 struct FastorIdx;
 
-template<typename... A>
-struct FastorIdx<IndexCollection<A...>>{
-    using index = Fastor::Index<static_cast<unsigned char>(A::Name)...>;
-    using oindex = Fastor::OIndex<static_cast<unsigned char>(A::Name)...>;
+template<typename... A, typename U>
+struct FastorIdx<IndexCollection<A...>, U>{
+    static constexpr size_t number(size_t id){
+        size_t i = 0;
+        while (i < U::Count && U::IdxList[i].id != id){
+            ++i;
+        }
+        return i;
+    }
+
+    using index = Fastor::Index<number(A::Id)...>;
+    using oindex = Fastor::OIndex<number(A::Id)...>;
 
     template<typename T>
     using tensor = Fastor::Tensor<T, A::Num...>;
@@ -362,9 +373,9 @@ void store_term(FT& out, const X& x, const C& coef){
 }
 
 template<size_t K>
-constexpr bool has_label(const std::array<NamedIdx, K>& list, char name){
+constexpr bool has_label(const std::array<NamedIdx, K>& list, size_t id){
     for (const NamedIdx& idx : list){
-        if (idx.name == name){
+        if (idx.id == id){
             return true;
         }
     }
@@ -372,9 +383,9 @@ constexpr bool has_label(const std::array<NamedIdx, K>& list, char name){
 }
 
 template<size_t K>
-constexpr NamedIdx find_label(const std::array<NamedIdx, K>& list, char name){
+constexpr NamedIdx find_label(const std::array<NamedIdx, K>& list, size_t id){
     for (const NamedIdx& idx : list){
-        if (idx.name == name){
+        if (idx.id == id){
             return idx;
         }
     }
@@ -396,7 +407,7 @@ struct LabelsOf;
 
 template<const auto& List, size_t... I>
 struct LabelsOf<List, std::index_sequence<I...>>{
-    using type = IndexCollection<AxisProxy<List[I].name, List[I].type, List[I].range>...>;
+    using type = IndexCollection<AxisProxy<List[I].id, List[I].type, List[I].range>...>;
 };
 
 // The positions in From of the labels of To, for Fastor::permute
@@ -405,15 +416,15 @@ struct PermuteIdx;
 
 template<typename From, typename... B>
 struct PermuteIdx<From, IndexCollection<B...>>{
-    static constexpr size_t position(char name){
+    static constexpr size_t position(size_t id){
         for (size_t i = 0; i < From::Count; ++i){
-            if (From::IdxList[i].name == name){
+            if (From::IdxList[i].id == id){
                 return i;
             }
         }
         return 0;
     }
-    using type = Fastor::Index<position(B::Name)...>;
+    using type = Fastor::Index<position(B::Id)...>;
 };
 
 // A factor with its axes in the order of the labels To: a reference when already in that order,
@@ -440,7 +451,7 @@ struct Arrangement{
     static constexpr size_t NK = [] {
         size_t res = 0;
         for (const NamedIdx& idx : First::IdxList){
-            if (has_label(Second::IdxList, idx.name)){
+            if (has_label(Second::IdxList, idx.id)){
                 ++res;
             }
         }
@@ -448,13 +459,13 @@ struct Arrangement{
     }();
 
     // The summed labels, in the chosen order
-    static constexpr std::array<char, NK> summed = [] {
-        std::array<char, NK> res{};
+    static constexpr std::array<size_t, NK> summed = [] {
+        std::array<size_t, NK> res{};
         size_t k = 0;
         auto collect = [&](const auto& from, const auto& other){
             for (const NamedIdx& idx : from){
-                if (has_label(other, idx.name)){
-                    res[k++] = idx.name;
+                if (has_label(other, idx.id)){
+                    res[k++] = idx.id;
                 }
             }
         };
@@ -472,12 +483,12 @@ struct Arrangement{
         std::array<NamedIdx, NA> res{};
         size_t k = 0;
         for (const NamedIdx& idx : First::IdxList){
-            if (!has_label(Second::IdxList, idx.name)){
+            if (!has_label(Second::IdxList, idx.id)){
                 res[k++] = idx;
             }
         }
-        for (char name : summed){
-            res[k++] = find_label(First::IdxList, name);
+        for (size_t id : summed){
+            res[k++] = find_label(First::IdxList, id);
         }
         return res;
     }();
@@ -486,11 +497,11 @@ struct Arrangement{
     static constexpr std::array<NamedIdx, NB> second = [] {
         std::array<NamedIdx, NB> res{};
         size_t k = 0;
-        for (char name : summed){
-            res[k++] = find_label(Second::IdxList, name);
+        for (size_t id : summed){
+            res[k++] = find_label(Second::IdxList, id);
         }
         for (const NamedIdx& idx : Second::IdxList){
-            if (!has_label(First::IdxList, idx.name)){
+            if (!has_label(First::IdxList, idx.id)){
                 res[k++] = idx;
             }
         }
@@ -543,9 +554,10 @@ auto contract_arranged(const P& p, const Q& q){
     using First = typename LabelsOf<Layout::first>::type;
     using Second = typename LabelsOf<Layout::second>::type;
     using Result = typename LabelsOf<Layout::result>::type;
+    using Both = typename Concat<First, Second>::type; // numbers the labels of both factors
     decltype(auto) a = arrange<First>(p);
     decltype(auto) b = arrange<Second>(q);
-    return owned_factor<Result>(Fastor::einsum<typename FastorIdx<First>::index, typename FastorIdx<Second>::index>(a, b));
+    return owned_factor<Result>(Fastor::einsum<typename FastorIdx<First, Both>::index, typename FastorIdx<Second, Both>::index>(a, b));
 }
 
 // Two factors contracted by Fastor
@@ -586,7 +598,7 @@ struct ContractionPlan{
 
     // The distinct labels of the product, with their ranges
     struct LabelTable{
-        std::array<char, 64> name{};
+        std::array<size_t, 64> id{};
         std::array<size_t, 64> range{};
         size_t count = 0;
     };
@@ -597,10 +609,10 @@ struct ContractionPlan{
             for (const NamedIdx& idx : list){
                 bool known = false;
                 for (size_t i = 0; i < res.count; ++i){
-                    known = known || res.name[i] == idx.name;
+                    known = known || res.id[i] == idx.id;
                 }
                 if (!known){
-                    res.name[res.count] = idx.name;
+                    res.id[res.count] = idx.id;
                     res.range[res.count] = idx.range;
                     ++res.count;
                 }
@@ -616,7 +628,7 @@ struct ContractionPlan{
         uint64_t res = 0;
         for (const NamedIdx& idx : list){
             for (size_t i = 0; i < table.count; ++i){
-                if (table.name[i] == idx.name){
+                if (table.id[i] == idx.id){
                     res |= uint64_t{1} << i;
                 }
             }
@@ -656,9 +668,9 @@ struct ContractionPlan{
                 if (part < rest){
                     continue; // each split once
                 }
-                const size_t c = cost[part] + cost[rest] + volume(group_labels[part] | group_labels[rest]);
-                if (c < cost[group]){
-                    cost[group] = c;
+                const size_t total = cost[part] + cost[rest] + volume(group_labels[part] | group_labels[rest]);
+                if (total < cost[group]){
+                    cost[group] = total;
                     res[group] = part;
                 }
             }
@@ -923,7 +935,7 @@ struct VirtualTensor : IndexCollection<AxProx...>{
             // product, Fastor::einsum gives wrong results for a label repeated within one tensor
             using Free = decltype(Ix::contracted());
             return make_term(NoCoef{}, owned_factor<Free>(
-                Fastor::einsum<typename FastorIdx<Ix>::index, typename FastorIdx<Free>::oindex>(data)));
+                Fastor::einsum<typename FastorIdx<Ix>::index, typename FastorIdx<Free, Ix>::oindex>(data)));
         }
     }
 
@@ -991,13 +1003,13 @@ public:
         return data_;
     }
 
-    // A(i, j), with Idx<'i'> i; Idx<'j'> j;
-    template<char... Labels> requires (sizeof...(Labels) == rank)
+    // A(i, j), with Idx<0> i; Idx<1> j;
+    template<size_t... Labels> requires (sizeof...(Labels) == rank)
     auto operator()(Idx<Labels>...){
         return detail::VirtualTensor<T, detail::AxisProxy<Labels, Axes::idx_type, Axes::Num>...>(*this);
     }
 
-    template<char... Labels> requires (sizeof...(Labels) == rank)
+    template<size_t... Labels> requires (sizeof...(Labels) == rank)
     auto operator()(Idx<Labels>...) const{
         return detail::VirtualTensor<const T, detail::AxisProxy<Labels, Axes::idx_type, Axes::Num>...>(*this);
     }
