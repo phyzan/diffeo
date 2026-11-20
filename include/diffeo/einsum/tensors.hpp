@@ -2,9 +2,11 @@
 
 
 #include <array>
+#include <bit>
 #include <concepts>
 #include <cstddef>
 #include <cstdint>
+#include <limits>
 #include <tuple>
 #include <type_traits>
 #include <utility>
@@ -235,10 +237,13 @@ The terms of a sum are evaluated one at a time into the assigned tensor: the fir
 assigned, the next ones are added or subtracted element-wise (Fastor expressions, vectorized),
 with their scalar factors applied in the same pass.
 
-Each term is a product, evaluated by a single Fastor::einsum over all of its tensors, so Fastor
-chooses the contraction order. OIndex makes einsum return the indices in the order of the
-assigned tensor, so no separate permutation is needed. A sum inside a product, like
-(A + B) * C, is evaluated first into a temporary, which is then one of the einsum factors.
+Each term is a product of tensors, contracted two at a time by Fastor::einsum. The order of the
+pairwise contractions is chosen at compile time to minimize the number of multiply-adds
+(ContractionPlan). Before each contraction, the two tensors are transposed if needed so that the
+summed indices are last in the first one and first in the second one, in the same order: that is
+the layout for which Fastor uses its matrix-multiply kernels (Arrangement). The result is then
+transposed into the order of the assigned tensor if needed. A sum inside a product, like
+(A + B) * C, is evaluated first into a temporary, which is then one of the factors.
 */
 
 // The labels are used as Fastor index values: A(mu, nu) -> Fastor::Index<'m', 'n'>
@@ -356,22 +361,346 @@ void store_term(FT& out, const X& x, const C& coef){
     }
 }
 
-// The tensor factors multiplied and contracted by Fastor, with the indices in the order of Out
-template<typename Out, typename... F>
-decltype(auto) contract_factors(const std::tuple<F...>& factors){
-    if constexpr (sizeof...(F) == 1 && (std::is_same_v<typename F::labels, Out> && ...)){
-        return std::get<0>(factors).get(); // already in that order: used as it is
+template<size_t K>
+constexpr bool has_label(const std::array<NamedIdx, K>& list, char name){
+    for (const NamedIdx& idx : list){
+        if (idx.name == name){
+            return true;
+        }
     }
-    else if constexpr (Out::Count == 0){
-        // A full contraction. Fastor's einsum doesn't take an empty OIndex<>, and there is no order anyway
-        return std::apply([](const F&... f){
-            return Fastor::einsum<typename FastorIdx<typename F::labels>::index...>(f.get()...);
-        }, factors);
+    return false;
+}
+
+template<size_t K>
+constexpr NamedIdx find_label(const std::array<NamedIdx, K>& list, char name){
+    for (const NamedIdx& idx : list){
+        if (idx.name == name){
+            return idx;
+        }
+    }
+    return {};
+}
+
+template<size_t K>
+constexpr size_t volume(const std::array<NamedIdx, K>& list){
+    size_t res = 1;
+    for (const NamedIdx& idx : list){
+        res *= idx.range;
+    }
+    return res;
+}
+
+// The IndexCollection with the indices of a constexpr list
+template<const auto& List, typename Seq = std::make_index_sequence<List.size()>>
+struct LabelsOf;
+
+template<const auto& List, size_t... I>
+struct LabelsOf<List, std::index_sequence<I...>>{
+    using type = IndexCollection<AxisProxy<List[I].name, List[I].type, List[I].range>...>;
+};
+
+// The positions in From of the labels of To, for Fastor::permute
+template<typename From, typename To>
+struct PermuteIdx;
+
+template<typename From, typename... B>
+struct PermuteIdx<From, IndexCollection<B...>>{
+    static constexpr size_t position(char name){
+        for (size_t i = 0; i < From::Count; ++i){
+            if (From::IdxList[i].name == name){
+                return i;
+            }
+        }
+        return 0;
+    }
+    using type = Fastor::Index<position(B::Name)...>;
+};
+
+// A factor with its axes in the order of the labels To: a reference when already in that order,
+// otherwise a transposed copy
+template<typename To, typename Fac>
+decltype(auto) arrange(const Fac& f){
+    using From = typename Fac::labels;
+    if constexpr (std::is_same_v<From, To>){
+        return f.get();
     }
     else{
-        return std::apply([](const F&... f){
-            return Fastor::einsum<typename FastorIdx<typename F::labels>::index..., typename FastorIdx<Out>::oindex>(f.get()...);
-        }, factors);
+        return Fastor::permute<typename PermuteIdx<From, To>::type>(f.get());
+    }
+}
+
+// One way to lay out two factors for Fastor::einsum: the summed labels last in First and first in
+// Second, in the same order (the one they have in First if KFromFirst, else in Second). This is the
+// layout for which Fastor uses its matrix-multiply kernels; others are several times slower.
+template<typename First, typename Second, bool KFromFirst>
+struct Arrangement{
+    static constexpr size_t NA = First::Count;
+    static constexpr size_t NB = Second::Count;
+
+    static constexpr size_t NK = [] {
+        size_t res = 0;
+        for (const NamedIdx& idx : First::IdxList){
+            if (has_label(Second::IdxList, idx.name)){
+                ++res;
+            }
+        }
+        return res;
+    }();
+
+    // The summed labels, in the chosen order
+    static constexpr std::array<char, NK> summed = [] {
+        std::array<char, NK> res{};
+        size_t k = 0;
+        auto collect = [&](const auto& from, const auto& other){
+            for (const NamedIdx& idx : from){
+                if (has_label(other, idx.name)){
+                    res[k++] = idx.name;
+                }
+            }
+        };
+        if constexpr (KFromFirst){
+            collect(First::IdxList, Second::IdxList);
+        }
+        else{
+            collect(Second::IdxList, First::IdxList);
+        }
+        return res;
+    }();
+
+    // First with the summed labels moved to the end
+    static constexpr std::array<NamedIdx, NA> first = [] {
+        std::array<NamedIdx, NA> res{};
+        size_t k = 0;
+        for (const NamedIdx& idx : First::IdxList){
+            if (!has_label(Second::IdxList, idx.name)){
+                res[k++] = idx;
+            }
+        }
+        for (char name : summed){
+            res[k++] = find_label(First::IdxList, name);
+        }
+        return res;
+    }();
+
+    // Second with the summed labels moved to the front
+    static constexpr std::array<NamedIdx, NB> second = [] {
+        std::array<NamedIdx, NB> res{};
+        size_t k = 0;
+        for (char name : summed){
+            res[k++] = find_label(Second::IdxList, name);
+        }
+        for (const NamedIdx& idx : Second::IdxList){
+            if (!has_label(First::IdxList, idx.name)){
+                res[k++] = idx;
+            }
+        }
+        return res;
+    }();
+
+    // The result: the remaining labels of First, then those of Second
+    static constexpr std::array<NamedIdx, NA + NB - 2 * NK> result = [] {
+        std::array<NamedIdx, NA + NB - 2 * NK> res{};
+        size_t k = 0;
+        for (size_t i = 0; i < NA - NK; ++i){
+            res[k++] = first[i];
+        }
+        for (size_t i = NK; i < NB; ++i){
+            res[k++] = second[i];
+        }
+        return res;
+    }();
+
+    // How many elements are copied to get this layout
+    static constexpr size_t moved = (first == First::IdxList ? 0 : volume(first)) + (second == Second::IdxList ? 0 : volume(second));
+};
+
+// The arrangement of a pair of factors that copies the fewest elements, out of both operand
+// orders and both orders of the summed labels
+template<typename L, typename R>
+struct PairLayout{
+    using A0 = Arrangement<L, R, true>;
+    using A1 = Arrangement<L, R, false>;
+    using A2 = Arrangement<R, L, true>;
+    using A3 = Arrangement<R, L, false>;
+
+    static constexpr size_t best = [] {
+        const std::array<size_t, 4> moved{A0::moved, A1::moved, A2::moved, A3::moved};
+        size_t res = 0;
+        for (size_t i = 1; i < moved.size(); ++i){
+            if (moved[i] < moved[res]){
+                res = i;
+            }
+        }
+        return res;
+    }();
+
+    using type = std::conditional_t<best == 0, A0, std::conditional_t<best == 1, A1, std::conditional_t<best == 2, A2, A3>>>;
+    static constexpr bool swapped = best >= 2;
+};
+
+template<typename Layout, typename P, typename Q>
+auto contract_arranged(const P& p, const Q& q){
+    using First = typename LabelsOf<Layout::first>::type;
+    using Second = typename LabelsOf<Layout::second>::type;
+    using Result = typename LabelsOf<Layout::result>::type;
+    decltype(auto) a = arrange<First>(p);
+    decltype(auto) b = arrange<Second>(q);
+    return owned_factor<Result>(Fastor::einsum<typename FastorIdx<First>::index, typename FastorIdx<Second>::index>(a, b));
+}
+
+// Two factors contracted by Fastor
+template<typename X, typename Y>
+auto contract_pair(const X& x, const Y& y){
+    using XL = typename X::labels;
+    using YL = typename Y::labels;
+    if constexpr (XL::Count == 0 && YL::Count == 0){
+        auto res = x.get();
+        res.data()[0] *= y.get().data()[0];
+        return owned_factor<XL>(std::move(res));
+    }
+    else if constexpr (XL::Count == 0){
+        // A fully contracted group, like A(a, b) * B(b, a), is a number
+        std::remove_cvref_t<decltype(y.get())> res = x.get().data()[0] * y.get();
+        return owned_factor<YL>(std::move(res));
+    }
+    else if constexpr (YL::Count == 0){
+        std::remove_cvref_t<decltype(x.get())> res = y.get().data()[0] * x.get();
+        return owned_factor<XL>(std::move(res));
+    }
+    else if constexpr (PairLayout<XL, YL>::swapped){
+        return contract_arranged<typename PairLayout<XL, YL>::type>(y, x);
+    }
+    else{
+        return contract_arranged<typename PairLayout<XL, YL>::type>(x, y);
+    }
+}
+
+// The order of the pairwise contractions of a product: for every group of factors, the part that is
+// contracted last with the rest of the group, so that the total number of multiply-adds is minimal
+// (dynamic programming over the groups of factors, like the "optimal" strategy of opt_einsum)
+template<typename... F>
+struct ContractionPlan{
+    static_assert(sizeof...(F) <= 8, "A product can have at most 8 tensors");
+
+    static constexpr uint32_t all = (uint32_t{1} << sizeof...(F)) - 1;
+
+    // The distinct labels of the product, with their ranges
+    struct LabelTable{
+        std::array<char, 64> name{};
+        std::array<size_t, 64> range{};
+        size_t count = 0;
+    };
+
+    static constexpr LabelTable table = [] {
+        LabelTable res{};
+        auto add = [&res](const auto& list){
+            for (const NamedIdx& idx : list){
+                bool known = false;
+                for (size_t i = 0; i < res.count; ++i){
+                    known = known || res.name[i] == idx.name;
+                }
+                if (!known){
+                    res.name[res.count] = idx.name;
+                    res.range[res.count] = idx.range;
+                    ++res.count;
+                }
+            }
+        };
+        (add(F::labels::IdxList), ...);
+        return res;
+    }();
+
+    // The labels of a factor, as bits of the table
+    template<size_t K>
+    static constexpr uint64_t bits_of(const std::array<NamedIdx, K>& list){
+        uint64_t res = 0;
+        for (const NamedIdx& idx : list){
+            for (size_t i = 0; i < table.count; ++i){
+                if (table.name[i] == idx.name){
+                    res |= uint64_t{1} << i;
+                }
+            }
+        }
+        return res;
+    }
+
+    // The labels left after contracting a group of factors: those in only one of them
+    static constexpr std::array<uint64_t, all + 1> group_labels = [] {
+        const std::array<uint64_t, sizeof...(F)> factor{bits_of(F::labels::IdxList)...};
+        std::array<uint64_t, all + 1> res{};
+        for (uint32_t group = 1; group <= all; ++group){
+            res[group] = res[group & (group - 1)] ^ factor[static_cast<size_t>(std::countr_zero(group))];
+        }
+        return res;
+    }();
+
+    static constexpr size_t volume(uint64_t bits){
+        size_t res = 1;
+        for (; bits != 0; bits &= bits - 1){
+            res *= table.range[static_cast<size_t>(std::countr_zero(bits))];
+        }
+        return res;
+    }
+
+    // split[group]: the part of the group contracted last with the rest of it
+    static constexpr std::array<uint32_t, all + 1> split = [] {
+        std::array<size_t, all + 1> cost{};
+        std::array<uint32_t, all + 1> res{};
+        for (uint32_t group = 1; group <= all; ++group){
+            if (std::has_single_bit(group)){
+                continue;
+            }
+            cost[group] = std::numeric_limits<size_t>::max();
+            for (uint32_t part = (group - 1) & group; part != 0; part = (part - 1) & group){
+                const uint32_t rest = group ^ part;
+                if (part < rest){
+                    continue; // each split once
+                }
+                const size_t c = cost[part] + cost[rest] + volume(group_labels[part] | group_labels[rest]);
+                if (c < cost[group]){
+                    cost[group] = c;
+                    res[group] = part;
+                }
+            }
+        }
+        return res;
+    }();
+};
+
+template<typename Plan, uint32_t Group, typename... F>
+auto contract_group(const std::tuple<F...>& factors){
+    if constexpr (std::has_single_bit(Group)){
+        const auto& f = std::get<static_cast<size_t>(std::countr_zero(Group))>(factors);
+        using Fac = std::remove_cvref_t<decltype(f)>;
+        return RefFactor<std::remove_cvref_t<decltype(f.get())>, typename Fac::labels>{f.get()};
+    }
+    else{
+        constexpr uint32_t part = Plan::split[Group];
+        return contract_pair(contract_group<Plan, part>(factors), contract_group<Plan, Group ^ part>(factors));
+    }
+}
+
+template<typename Out, typename... F>
+auto contract_network(const std::tuple<F...>& factors){
+    using Plan = ContractionPlan<F...>;
+    auto res = contract_group<Plan, Plan::all>(factors);
+    using Labels = typename decltype(res)::labels;
+    if constexpr (std::is_same_v<Labels, Out>){
+        return std::move(res.t);
+    }
+    else{
+        return Fastor::permute<typename PermuteIdx<Labels, Out>::type>(res.t);
+    }
+}
+
+// The tensor factors of a term multiplied and contracted, with the indices in the order of Out
+template<typename Out, typename... F>
+decltype(auto) contract_factors(const std::tuple<F...>& factors){
+    if constexpr (sizeof...(F) == 1){
+        return arrange<Out>(std::get<0>(factors));
+    }
+    else{
+        return contract_network<Out>(factors);
     }
 }
 
@@ -612,15 +941,18 @@ private:
     template<typename E>
     VirtualTensor& assign(const E& rhs){
         using Lhs = IndexCollection<AxProx...>;
-        static_assert(!std::is_const_v<T>, "Cannot assign to a const tensor");
-        static_assert(Lhs::NFree == Lhs::Count, "The indices of an assigned tensor must all be free (no repeated labels)");
-        static_assert(addable(Lhs::contracted(), E::contracted()),
-                      "The free indices of the right hand side must be those of the assigned tensor "
-                      "(same labels, Loc and range), in any order");
-        static_assert(std::is_same_v<value_type, typename E::value_type>,
-                      "The right hand side must have the element type of the assigned tensor");
+        constexpr bool writable = !std::is_const_v<T>;
+        constexpr bool all_free = Lhs::NFree == Lhs::Count;
+        constexpr bool same_indices = addable(Lhs::contracted(), E::contracted());
+        constexpr bool same_type = std::is_same_v<value_type, typename E::value_type>;
+        static_assert(writable, "Cannot assign to a const tensor");
+        static_assert(all_free, "The indices of an assigned tensor must all be free (no repeated labels)");
+        static_assert(same_indices, "The free indices of the right hand side must be those of the assigned tensor "
+                                    "(same labels, Loc and range), in any order");
+        static_assert(same_type, "The right hand side must have the element type of the assigned tensor");
 
-        if constexpr (!std::is_const_v<T>){ // otherwise only the static_assert above is reported
+        // When a check fails, the evaluation isn't compiled, so that only the failed check is reported
+        if constexpr (writable && all_free && same_indices && same_type){
             auto& out = tensor.fastor();
             if (rhs.aliases(&tensor)){
                 // e.g. A(mu, nu) = B(mu, nu) + A(nu, mu): the terms are stored one at a time,
