@@ -20,6 +20,9 @@ enum class Loc : uint8_t{
     Up, Dn,
 };
 
+// NOLINTNEXTLINE(performance-enum-size)
+enum : size_t {MU, NU, I, J, K};
+
 // As template parameter on a tensor
 template<Loc Type, size_t N>
 struct Ax{
@@ -1014,10 +1017,35 @@ public:
         return detail::VirtualTensor<const T, detail::AxisProxy<Labels, Axes::idx_type, Axes::Num>...>(*this);
     }
 
+    // A(0, 1): a single component, through Fastor's own indexing
+    // (bounds checked unless NDEBUG, negative indices count from the end)
+    template<std::integral... Int> requires (sizeof...(Int) == rank && rank > 0)
+    T& operator()(const Int... idx){
+        return data_(idx...);
+    }
+
+    template<std::integral... Int> requires (sizeof...(Int) == rank && rank > 0)
+    const T& operator()(const Int... idx) const{
+        return data_(idx...);
+    }
+
 private:
 
     fastor_type data_{}; // zero initialized
 
 };
+
+
+template<typename T, size_t N>
+using Vector = Tensor<T, Ax<Loc::Up, N>>;
+
+template<typename T, size_t N>
+using CoVector = Tensor<T, Ax<Loc::Dn, N>>;
+
+template<typename T, size_t N>
+using Operator = Tensor<T, Ax<Loc::Up, N>, Ax<Loc::Dn, N>>;
+
+// TODO : Tensors should also carry their coordinate system in which their components are expressed, as a template parameter.
+// Then, operations between tensors expressed in different coordinate systems can be forbidden at compile time.
 
 } // namespace geom
