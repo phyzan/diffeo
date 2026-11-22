@@ -11,7 +11,7 @@ Linear algebra module, for matrices of small, trivially copyable/constructible m
 namespace geom::linalg{
 
 template<size_t N>
-int levi_civita(std::array<size_t, N> idx);
+constexpr int levi_civita(std::array<size_t, N> idx);
 
 namespace detail{
 
@@ -105,8 +105,7 @@ T det_rowmajor(const T* mat){
 }
 
 template<size_t NDIM, size_t Rank, typename ArrayType, size_t... Is>
-void fill_levi_civita_impl(ArrayType& out, std::index_sequence<Is...>){
-    
+constexpr void fill_levi_civita_impl(ArrayType& out, std::index_sequence<Is...>){
     for_each<Layout::Left>([&](const auto... i){
         out(i...) = levi_civita(std::array<size_t, Rank>{i...});
     }, (Is*0UL + NDIM)...);
@@ -146,7 +145,7 @@ T detLU( const FArray2D<T, N, N>& mat){
 
 
 template<size_t N>
-int levi_civita(const std::array<size_t, N> idx){
+constexpr int levi_civita(const std::array<size_t, N> idx){
     // For all i in idx: 0 <= i < N
     int inversions = 0;
 
@@ -167,7 +166,7 @@ int levi_civita(const std::array<size_t, N> idx){
 
 
 template<size_t NDIM, size_t Rank, typename ArrayType>
-void fill_levi_civita(ArrayType& out){
+constexpr void fill_levi_civita(ArrayType& out){
     detail::fill_levi_civita_impl<NDIM, Rank>(out, std::make_index_sequence<Rank>{});
 }
 

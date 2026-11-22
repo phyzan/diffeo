@@ -1,8 +1,10 @@
 #pragma once
 
 
+#include <algorithm>
 #include <array>
 #include <bit>
+#include <cassert>
 #include <concepts>
 #include <cstddef>
 #include <cstdint>
@@ -12,6 +14,8 @@
 #include <utility>
 
 #include <Fastor/Fastor.h>
+
+#include <diffeo/linalg/arrays.hpp> // NestedList
 
 
 namespace geom{
@@ -998,6 +1002,14 @@ public:
 
     explicit Tensor(const fastor_type& data) : data_(data) {}
 
+    // Nested as deep as the rank, in index order:
+    // Operator<double, 2> A{{1, 2}, {3, 4}};  // A(1, 0) == 3
+    // Each list must match its axis length (asserted); in release builds, extra values
+    // are ignored and missing ones are zero
+    Tensor(NestedList<T, rank> values) requires (rank > 0) {
+        assign_nested(values);
+    }
+
     fastor_type& fastor(){
         return data_;
     }
@@ -1030,6 +1042,23 @@ public:
     }
 
 private:
+
+    static constexpr std::array<size_t, rank> shape_{Axes::Num...};
+
+    // values: the sub-list along the axis after the indices idx... of its parent lists
+    template<std::integral... Int>
+    void assign_nested(const NestedList<T, rank - sizeof...(Int)>& values, const Int... idx){
+        constexpr size_t axis = sizeof...(Int);
+        assert(values.size() == shape_[axis] && "Initializer list does not match the shape");
+        const size_t n = std::min(values.size(), shape_[axis]);
+        for (size_t i = 0; i < n; ++i){
+            if constexpr (axis + 1 == rank){
+                data_(idx..., i) = values.begin()[i];
+            } else {
+                assign_nested(values.begin()[i], idx..., i);
+            }
+        }
+    }
 
     fastor_type data_{}; // zero initialized
 

@@ -16,12 +16,7 @@
 */
 
 #include <array>
-
-#include "diffeo/einsum/tensors.hpp"
-#include <diffeo/coordinates/common.hpp>
-#include <diffeo/coordinates/KerrCoords.hpp>
-#include <diffeo/coordinates/transformations.hpp>
-#include <diffeo/metric/metric_tensor.hpp>
+#include <diffeo/diffeo.hpp>
 
 
 namespace geom::adm{
@@ -32,18 +27,74 @@ T sin_sqr(const T x){
     return sin_x * sin_x;
 }
 
+template<typename T, typename CoordSys>
+inline T lfac(const MetricTensor<T, CoordSys>& gcov, const Vector<T, 3>& u) {
+    constexpr Idx<0> i; constexpr Idx<1> j;
+    return sqrt(1 + gcov(i, j)*u(i)*u(j));
+}
+
+template<typename T, typename CoordSys>
+inline T lfac(const InverseMetricTensor<T, CoordSys>& gcont, const CoVector<T, 3>& u) {
+    constexpr Idx<0> i; constexpr Idx<1> j;
+    return sqrt(1 + gcont(i, j)*u(i)*u(j));
+}
+
+/**
+ * @brief 3 + 1 split: Interpretes the metric as the spatial part of a 4D spacetime
+ */
+template<typename Derived, typename CoordSys, typename T>
+struct ADMMetric : BaseMetric<Derived, T, CoordSys>{
+
+    using Coords = Coordinates<CoordSys, T>;
+
+    T lapse(const Coords& x) const {
+        static_assert(sizeof(T) == 0, "lapse(x) not implemented");
+        return 0;
+    }
+
+    /// @brief d_i(lapse): A covariant 3-vector (transforms properly under spatial transformations)
+    void ddx_lapse(CoVector<T, 3>& out, const Coords& x) const {
+        static_assert(sizeof(T) == 0, "d_i lapse(x) not implemented");
+    }
+
+
+    void shift(Vector<T, 3>& out, const Coords& x) const {
+        static_assert(sizeof(T) == 0, "shift^i(x) not implemented");
+    }
+
+
+    void ddx_shift(Tensor<T, Ax<Loc::Dn, 3>, Ax<Loc::Up, 3>>& out, const Coords& x) const{
+        static_assert(sizeof(T) == 0, "d_i shift^j(x) not implemented");
+    }
+
+    /// @brief The Lorentz factor in a local frame `u` at point `x`
+    T lfac(const Coords& x, const Vector<T, 3>& u) const {
+        MetricTensor<T, CoordSys> gcov;
+        static_cast<const Derived*>(this)->fill_gcov(gcov, x);
+
+        return adm::lfac(gcov, u);
+    }
+
+    T lfac(const Coords& x, const CoVector<T, 3>& u) const {
+        InverseMetricTensor<T, CoordSys> gcont;
+        static_cast<const Derived*>(this)->fill_gcont(gcont, x);
+
+        return adm::lfac(gcont, u);
+    }
+};
+
 // ------------- 3D Kerr metric ---------------
 
 
 
 template<typename T>
-struct KerrBL3D : BaseMetric<KerrBL3D<T>, T, Spherical>{
+struct KerrBL3D : ADMMetric<KerrBL3D<T>, Spherical, T>{
     /*
     Using units where rg = 1, so that -1 <= alpha = Jc/(GM^2) <= 1
     */
     T alpha;
 
-    using Base = BaseMetric<KerrBL3D<T>, T, Spherical>;
+    using Base = ADMMetric<KerrBL3D<T>, Spherical, T>;
     using Coords = Coordinates<Spherical, T>;
 
     /// @brief Get g_ij(x)
@@ -80,6 +131,37 @@ struct KerrBL3D : BaseMetric<KerrBL3D<T>, T, Spherical>{
         xdiff::power<2>(sigma(x.r(), sin2_th))*sin2_th;
         */
         return g_rr(x.r(), sin2_th) * g_thth(x.r(), sin2_th) * g_phph(x.r(), sin2_th);
+    }
+
+    /**
+    @brief out_i = (d_i g_jk) u^j u^k. g_ij is diagonal and independent of phi, so that
+    out_i = d_i(g_rr) (u^r)^2 + d_i(g_thth) (u^theta)^2 + d_i(g_phph) (u^phi)^2, and out_phi = 0
+    */
+    void ddx_gcov_contracted(CoVector<T, 3>& out, const Coords& x, const Vector<T, 3>& u) const {
+        /*
+        g_rr = Sigma/Delta, g_thth = Sigma and g_phph = A sin^2(theta)/Sigma, with
+        d_r Sigma = 2r, d_r Delta = 2(r - 1), d_th Sigma = -alpha^2 sin(2 theta) and d_th Delta = 0
+        */
+        const T r = x.r();
+        const T sin_th = sin(x.theta());
+        const T sin2_th = sin_th*sin_th;
+        const T sin_2th = 2*sin_th*cos(x.theta());
+        const T sig = sigma(r, sin2_th);
+        const T del = delta(r);
+        const T big = big_a(r, sin2_th);
+        const T dth_sig = -alpha*alpha*sin_2th;
+
+        const T dr_grr = 2*(r*del - (r - 1)*sig)/(del*del);
+        const T dr_gphph = sin2_th*(ddr_big_a(r, sin2_th) - 2*r*big/sig)/sig;
+        const T dth_grr = dth_sig/del;
+        const T dth_gphph = (ddth_big_a(r, sin_2th)*sin2_th + big*sin_2th - big*sin2_th*dth_sig/sig)/sig;
+
+        const T ur2 = u(0)*u(0);
+        const T uth2 = u(1)*u(1);
+        const T uph2 = u(2)*u(2);
+        out(0) = dr_grr*ur2 + 2*r*uth2 + dr_gphph*uph2;
+        out(1) = dth_grr*ur2 + dth_sig*uth2 + dth_gphph*uph2;
+        out(2) = 0;
     }
 
     // ----------------- 3+1 quantities ------------------
@@ -215,10 +297,10 @@ On the ingoing Kerr-Schild slices, with M = 1 and z = 2r/Sigma:
 This is regular across the horizon, and is the metric BHAC uses for coord=mks, before its relabeling of r and theta.
 */
 template<typename T>
-struct KerrSKS3D : BaseMetric<KerrSKS3D<T>, T, SKS3D>{
+struct KerrSKS3D : ADMMetric<KerrSKS3D<T>, SKS3D, T>{
     T alpha; // spin, with -1 <= alpha <= 1
 
-    using Base = BaseMetric<KerrSKS3D<T>, T, SKS3D>;
+    using Base = ADMMetric<KerrSKS3D<T>, SKS3D, T>;
     using Coords = Coordinates<SKS3D, T>;
 
     using Base::fill_gcov;
@@ -242,6 +324,33 @@ struct KerrSKS3D : BaseMetric<KerrSKS3D<T>, T, SKS3D>{
         const T sin2_th = sin_sqr(x.theta());
         const T sig = sigma(x.r(), sin2_th);
         return sin2_th*sig*(sig + 2*x.r());
+    }
+
+    /**
+    @brief out_i = (d_i g_jk) u^j u^k. g_ij is independent of phi, so that out_phi = 0 and
+    out_i = d_i(g_rr) (u^r)^2 + 2 d_i(g_rphi) u^r u^phi + d_i(g_thth) (u^theta)^2 + d_i(g_phph) (u^phi)^2
+    */
+    void ddx_gcov_contracted(CoVector<T, 3>& out, const Coords& x, const Vector<T, 3>& u) const {
+        /*
+        g_rr = 1 + z, g_rphi = -alpha (1 + z) sin^2(theta), g_thth = Sigma and
+        g_phph = (r^2 + alpha^2) sin^2(theta) + z alpha^2 sin^4(theta), with d_th Sigma = -alpha^2 sin(2 theta)
+        */
+        T z, dr_z, dth_z;
+        z_and_ddx(z, dr_z, dth_z, x);
+        const T r = x.r();
+        const T sin_th = sin(x.theta());
+        const T sin2_th = sin_th*sin_th;
+        const T sin_2th = 2*sin_th*cos(x.theta());
+        const T alpha2 = alpha*alpha;
+
+        const T ur2 = u(0)*u(0);
+        const T ur_uph = u(0)*u(2);
+        const T uth2 = u(1)*u(1);
+        const T uph2 = u(2)*u(2);
+        out(0) = dr_z*ur2 - 2*alpha*dr_z*sin2_th*ur_uph + 2*r*uth2 + (2*r + dr_z*alpha2*sin2_th)*sin2_th*uph2;
+        out(1) = dth_z*ur2 - 2*alpha*(dth_z*sin2_th + (1 + z)*sin_2th)*ur_uph - alpha2*sin_2th*uth2
+               + ((r*r + alpha2)*sin_2th + alpha2*(dth_z*sin2_th + 2*z*sin_2th)*sin2_th)*uph2;
+        out(2) = 0;
     }
 
     // ----------------- 3+1 quantities ------------------
@@ -320,12 +429,12 @@ is diagonal, so that with no summation over i, j:
 The lapse is the same scalar, as the slices are the same.
 */
 template<typename T>
-struct KerrMKS3D : BaseMetric<KerrMKS3D<T>, T, MKS3D>{
+struct KerrMKS3D : ADMMetric<KerrMKS3D<T>, MKS3D, T>{
     T alpha; // spin, with -1 <= alpha <= 1
     T h;     // BHAC's coordpar(h_), with |h| < 1
     T r0;    // BHAC's coordpar(R0_)
 
-    using Base = BaseMetric<KerrMKS3D<T>, T, MKS3D>;
+    using Base = ADMMetric<KerrMKS3D<T>, MKS3D, T>;
     using Coords = Coordinates<MKS3D, T>;
 
     using Base::fill_gcov;
@@ -354,6 +463,38 @@ struct KerrMKS3D : BaseMetric<KerrMKS3D<T>, T, MKS3D>{
         to_sks(x_sks, jac, x);
         const T det_jac = jac(0, 0)*jac(1, 1);
         return det_jac*det_jac*sks().gcov_det(x_sks);
+    }
+
+    /**
+    @brief out_i = (d_i g_jk) u^j u^k. With U^j = J_j u^j the same vector in spherical KS, g_jk u^j u^k = g^{SKS}_jk U^j U^k,
+    and U^j depends on x^j through J_j, so that with no summation over i:
+
+        out_i = J_i [(d_i g^{SKS}_jk) U^j U^k] + 2 d_i(J_i) u^i (g^{SKS}_ik U^k),
+
+    with d_s(J_s) = e^s = J_s, d_vartheta(J_vartheta) = -2h sin(2 vartheta) and J_phi = 1
+    */
+    void ddx_gcov_contracted(CoVector<T, 3>& out, const Coords& x, const Vector<T, 3>& u) const {
+        Coordinates<SKS3D, T> x_sks;
+        Jacobian<T, SKS3D, MKS3D> jac;
+        to_sks(x_sks, jac, x);
+        const KerrSKS3D<T> g_sks = sks();
+
+        Vector<T, 3> u_sks;
+        for (int i = 0; i < 3; ++i){
+            u_sks(i) = jac(i, i)*u(i);
+        }
+        g_sks.ddx_gcov_contracted(out, x_sks, u_sks); // out_phi = 0
+
+        // g^{SKS}_ik U^k for i = r, theta: g^{SKS} has no (r, theta) and (theta, phi) components
+        MetricTensor<T, SKS3D> g;
+        g_sks.fill_gcov(g, x_sks);
+        const T gu_r = g(0, 0)*u_sks(0) + g(0, 2)*u_sks(2);
+        const T gu_th = g(1, 1)*u_sks(1);
+
+        const T ds_js = jac(0, 0);
+        const T dvth_jvth = -2*h*sin(2*x.vartheta());
+        out(0) = jac(0, 0)*out(0) + 2*ds_js*u(0)*gu_r;
+        out(1) = jac(1, 1)*out(1) + 2*dvth_jvth*u(1)*gu_th;
     }
 
     // ----------------- 3+1 quantities ------------------
@@ -438,10 +579,10 @@ x + i y = (r + i alpha) sin(theta) e^{i phi_ks}, z = r cos(theta), where l_i dx^
 Unlike the spherical charts, it is regular on the axis, but it is singular at r = 0, inside the inner horizon.
 */
 template<typename T>
-struct KerrCKS3D : BaseMetric<KerrCKS3D<T>, T, CKS3D>{
+struct KerrCKS3D : ADMMetric<KerrCKS3D<T>, CKS3D, T>{
     T alpha; // spin, with -1 <= alpha <= 1
 
-    using Base = BaseMetric<KerrCKS3D<T>, T, CKS3D>;
+    using Base = ADMMetric<KerrCKS3D<T>, CKS3D, T>;
     using Coords = Coordinates<CKS3D, T>;
 
     using Base::fill_gcov;
@@ -476,6 +617,22 @@ struct KerrCKS3D : BaseMetric<KerrCKS3D<T>, T, CKS3D>{
     /// @brief det(g_ij) = 1 + f
     T gcov_det(const Coords& x) const {
         return 1 + f_of(x);
+    }
+
+    /// @brief out_i = (d_i g_jk) u^j u^k = d_i(f) (l_j u^j)^2 + 2 f (l_j u^j) d_i(l_k) u^k, from g_jk = delta_jk + f l_j l_k
+    void ddx_gcov_contracted(CoVector<T, 3>& out, const Coords& x, const Vector<T, 3>& u) const {
+        T r, f;
+        std::array<T, 3> l, dr, df;
+        f_and_l(r, f, l, x);
+        ddx_r_and_f(dr, df, r, f, x);
+        std::array<std::array<T, 3>, 3> dl;
+        ddx_l(dl, r, l, dr, x);
+
+        const T lu = l[0]*u(0) + l[1]*u(1) + l[2]*u(2);
+        for (int i = 0; i < 3; ++i){
+            const T dl_u = dl[i][0]*u(0) + dl[i][1]*u(1) + dl[i][2]*u(2);
+            out(i) = df[i]*lu*lu + 2*f*lu*dl_u;
+        }
     }
 
     // ----------------- 3+1 quantities ------------------
@@ -523,25 +680,8 @@ struct KerrCKS3D : BaseMetric<KerrCKS3D<T>, T, CKS3D>{
         std::array<T, 3> l, dr, df;
         f_and_l(r, f, l, x);
         ddx_r_and_f(dr, df, r, f, x);
-
-        /*
-        Differentiating l_x (r^2 + alpha^2) = r x + alpha y, l_y (r^2 + alpha^2) = r y - alpha x and l_z r = z:
-        d_i(l_x) = [(x - 2 r l_x) d_i(r) + r delta_ix + alpha delta_iy]/(r^2 + alpha^2),
-        d_i(l_y) = [(y - 2 r l_y) d_i(r) + r delta_iy - alpha delta_ix]/(r^2 + alpha^2),
-        d_i(l_z) = [delta_iz - l_z d_i(r)]/r
-        */
-        const T r2_alpha2 = r*r + alpha*alpha;
         std::array<std::array<T, 3>, 3> dl; // dl[i][j] = d_i(l_j)
-        for (int i = 0; i < 3; ++i){
-            dl[i][0] = (x.x() - 2*r*l[0])*dr[i]/r2_alpha2;
-            dl[i][1] = (x.y() - 2*r*l[1])*dr[i]/r2_alpha2;
-            dl[i][2] = -l[2]*dr[i]/r;
-        }
-        dl[0][0] += r/r2_alpha2;
-        dl[1][0] += alpha/r2_alpha2;
-        dl[1][1] += r/r2_alpha2;
-        dl[0][1] -= alpha/r2_alpha2;
-        dl[2][2] += 1/r;
+        ddx_l(dl, r, l, dr, x);
 
         const T one_f = 1 + f;
         const T c = f/one_f;
@@ -589,6 +729,28 @@ struct KerrCKS3D : BaseMetric<KerrCKS3D<T>, T, CKS3D>{
             df[i] = f*(3/r - 4*r3/big_d)*dr[i]; // d(D) = 4 r^3 d(r) + 2 alpha^2 z dz
         }
         df[2] -= 2*f*alpha2*z/big_d;
+    }
+
+    /**
+    @brief dl[i][j] = d_i(l_j), given the Kerr radius r, l and dr[i] = d_i(r) at x.
+    Differentiating l_x (r^2 + alpha^2) = r x + alpha y, l_y (r^2 + alpha^2) = r y - alpha x and l_z r = z:
+
+        d_i(l_x) = [(x - 2 r l_x) d_i(r) + r delta_ix + alpha delta_iy]/(r^2 + alpha^2),
+        d_i(l_y) = [(y - 2 r l_y) d_i(r) + r delta_iy - alpha delta_ix]/(r^2 + alpha^2),
+        d_i(l_z) = [delta_iz - l_z d_i(r)]/r
+    */
+    void ddx_l(std::array<std::array<T, 3>, 3>& dl, const T r, const std::array<T, 3>& l, const std::array<T, 3>& dr, const Coords& x) const {
+        const T r2_alpha2 = r*r + alpha*alpha;
+        for (int i = 0; i < 3; ++i){
+            dl[i][0] = (x.x() - 2*r*l[0])*dr[i]/r2_alpha2;
+            dl[i][1] = (x.y() - 2*r*l[1])*dr[i]/r2_alpha2;
+            dl[i][2] = -l[2]*dr[i]/r;
+        }
+        dl[0][0] += r/r2_alpha2;
+        dl[1][0] += alpha/r2_alpha2;
+        dl[1][1] += r/r2_alpha2;
+        dl[0][1] -= alpha/r2_alpha2;
+        dl[2][2] += 1/r;
     }
 };
 

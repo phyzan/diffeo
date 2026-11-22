@@ -70,6 +70,19 @@ struct BaseMetric{
     */
     // ======================================
 
+    // ==== MUST OVERRIDE, only if called ====
+
+    /**
+    @brief out_i = (d_i g_jk) u^j u^k at x, for a vector u that is held fixed.
+    In the equations of motion of the covariant u_i, this gives the force of the spatial metric without
+    the rank-3 d_i g_jk, as -(1/2) u_j u_k d_i g^jk = (1/2) u^j u^k d_i g_jk.
+    @note Not a tensor, as d_i g_jk is not
+    */
+    void ddx_gcov_contracted(CoVector<T, N>& /*out*/, const Coords& /*x*/, const Vector<T, N>& /*u*/) const {
+        static_assert(sizeof(T)==0, "Must override ddx_gcov_contracted");
+    }
+    // ======================================
+
     void fill_gcont(InverseMetricTensor<T, CoordSys>& out, const Coords& x) const {
         MetricTensor<T, CoordSys> gcov;
         static_cast<const Derived*>(this)->fill_gcov(gcov, x);
