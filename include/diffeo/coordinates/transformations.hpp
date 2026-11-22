@@ -97,9 +97,15 @@ T azimuth(const T y, const T x){
 }
 
 /*
-Solves theta = vartheta + (h/2) sin(2 vartheta) for vartheta. With x = 2 vartheta and
-epsilon = 2 theta, this is epsilon = x + h sin(x), whose right side is increasing for |h| < 1.
+Solves theta = vartheta + (h/2) sin(2 vartheta) for vartheta. With x = 2 vartheta and epsilon = 2 theta,
+this is f(x) = x + h sin(x) - epsilon = 0, where f' = 1 + h cos(x) >= 1 - |h| > 0 for |h| < 1.
 The root is within |h| of epsilon, because x - epsilon = -h sin(x), so any theta can be given.
+
+Newton's method from x = epsilon, kept inside the bracket [epsilon - |h|, epsilon + |h|], which shrinks
+with every step: a step that would leave it is replaced by bisection. As |f''| <= |h|, the error falls as
+e_{n+1} <= |h|/(2(1 - |h|)) e_n^2, so that a handful of steps reach the machine precision for moderate h.
+Ending on a Newton step also gives the right gradient if T is a Dual: at the root, d(x_{n+1})/d(epsilon)
+= 1/f' whatever the gradient of x_n, as bisection carries none.
 */
 template<typename T>
 T vartheta_of(const T theta, const auto h){
@@ -107,21 +113,28 @@ T vartheta_of(const T theta, const auto h){
     const T epsilon = 2*theta;
     T lo = epsilon - abs(h);
     T hi = epsilon + abs(h);
-    for (int i = 0; i < 100 && hi - lo > tol; ++i){
-        const T x = (lo + hi)/2;
-        if (epsilon - x - h*sin(x) > 0){
-            lo = x;
-        }
-        else{
+    T x = epsilon;
+    for (int i = 0; i < 100; ++i){
+        // x - epsilon first: it is exact while x is within a factor of 2 of epsilon (Sterbenz), so that only
+        // h sin(x) is rounded. (x + h sin(x)) - epsilon would round to ~ulp(epsilon), divided by f' ~ 1 - |h|
+        const T f = (x - epsilon) + h*sin(x);
+        if (f > 0){
             hi = x;
         }
+        else{
+            lo = x;
+        }
+        T x_new = x - f/(1 + h*cos(x));
+        if (!(x_new >= lo && x_new <= hi)){ // also when x_new is NaN
+            x_new = (lo + hi)/2;
+        }
+        const T step = x_new - x;
+        x = x_new;
+        if (!(abs(step) > tol)){ // converged, or NaN
+            break;
+        }
     }
-
-    // Performing one Newton step in case Dual numbers are used in the
-    // future for automatic differentiation.
-    T vartheta = (lo + hi)/4;
-    vartheta -= (vartheta + h/2 * sin(2*vartheta) - theta) / (1 + h * cos(2*vartheta));
-    return vartheta;
+    return x/2;
 }
 } // namespace geom::detail
 
