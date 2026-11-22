@@ -34,7 +34,7 @@
 
 # Overview
 
-The library provides an ecosystem for performing tensor operations in general-relativistic environments. It relies on [Fastor](https://github.com/romeric/Fastor) for optimizing tensor-network operations, allowing users to write tensor products in more natural language, while achieving maximum performance, without writing hand-written kernels for each contraction. `Diffeo` wraps a `Fastor::Tensor` in a `geom::Tensor` with explicitly defined lower or upper indices, so that a contraction `co_v(mu) = g(mu, nu) * v(nu);` only compiles if it obeys the Einstein summation rules.
+The library provides an ecosystem for performing tensor operations in general-relativistic environments. It relies on [Fastor](https://github.com/romeric/Fastor) for optimizing tensor-network operations, allowing users to write tensor products naturally in a single line, while achieving maximum performance without hand-written kernels. `Diffeo` wraps a `Fastor::Tensor` in a `geom::Tensor` with explicitly defined lower or upper indices, so that a contraction `co_v(mu) = g(mu, nu) * v(nu);` only compiles if it obeys the Einstein summation rules.
 
 Additionally, `Diffeo` provides tools for defining coordinate systems, transformation Jacobian matrices and metric tensors, all wrapped in `C++` classes and functions that only allow mathematically valid tensor operations at compile time. It is the user's responsibility to define the various mathematical expressions correctly.
 
