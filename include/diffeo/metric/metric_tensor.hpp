@@ -6,6 +6,12 @@
 
 namespace geom{
 
+template<typename T, typename CoordSys>
+class MetricTensor;
+
+template<typename T, typename CoordSys>
+class InverseMetricTensor;
+
 ///@brief g_mu_nu
 template<typename T, typename CoordSys>
 class MetricTensor : Tensor<T, Ax<Loc::Dn, CoordSys::N>, Ax<Loc::Dn, CoordSys::N>>{
@@ -17,6 +23,10 @@ public:
 
     using Base::operator();
     using Base::fastor;
+
+    void get_inverse(InverseMetricTensor<T, CoordSys>& out) const{
+        linalg::detail::invert_rowmajor<T, N>(out.fastor().data(), this->fastor().data());
+    }
 };
 
 ///@brief g^mu^nu
@@ -30,6 +40,10 @@ public:
 
     using Base::operator();
     using Base::fastor;
+
+    void get_inverse(MetricTensor<T, CoordSys>& out) const{
+        linalg::detail::invert_rowmajor<T, N>(out.fastor().data(), this->fastor().data());
+    }
 };
 
 ///@brief Generator for MetricTensor, providing analytical expressions
