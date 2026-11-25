@@ -150,8 +150,8 @@ constexpr int levi_civita(const std::array<size_t, N> idx){
     int inversions = 0;
 
     // Check for repeated indices
-    for (int i = 0; i < N; ++i) {
-        for (int j = i + 1; j < N; ++j) {
+    for (size_t i = 0; i < N; ++i) {
+        for (size_t j = i + 1; j < N; ++j) {
             if (idx[i] == idx[j]){
                 return 0;
             }
