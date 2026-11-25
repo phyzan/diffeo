@@ -5,6 +5,9 @@ project(diffeo LANGUAGES CXX)
 set(BUILD_TESTING OFF)
 add_subdirectory(external/Fastor)
 add_library(diffeo::Fastor ALIAS Fastor)
+# Fastor's headers as system headers, so that users don't get their warnings
+get_target_property(FASTOR_INCLUDE_DIRS Fastor INTERFACE_INCLUDE_DIRECTORIES)
+set_target_properties(Fastor PROPERTIES INTERFACE_SYSTEM_INCLUDE_DIRECTORIES "${FASTOR_INCLUDE_DIRS}")
 
 add_library(diffeo INTERFACE)
 add_library(diffeo::diffeo ALIAS diffeo)
