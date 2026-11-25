@@ -24,8 +24,6 @@ enum class Loc : uint8_t{
     Up, Dn,
 };
 
-// NOLINTNEXTLINE(performance-enum-size)
-enum : size_t {MU, NU, I, J, K};
 
 // As template parameter on a tensor
 template<Loc Type, size_t N>

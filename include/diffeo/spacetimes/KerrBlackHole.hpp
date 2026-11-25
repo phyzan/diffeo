@@ -27,18 +27,6 @@ T sin_sqr(const T x){
     return sin_x * sin_x;
 }
 
-template<typename T, typename CoordSys>
-inline T lfac(const MetricTensor<T, CoordSys>& gcov, const Vector<T, 3>& u) {
-    constexpr Idx<0> i; constexpr Idx<1> j;
-    return sqrt(1 + gcov(i, j)*u(i)*u(j));
-}
-
-template<typename T, typename CoordSys>
-inline T lfac(const InverseMetricTensor<T, CoordSys>& gcont, const CoVector<T, 3>& u) {
-    constexpr Idx<0> i; constexpr Idx<1> j;
-    return sqrt(1 + gcont(i, j)*u(i)*u(j));
-}
-
 /**
  * @brief 3 + 1 split: Interpretes the metric as the spatial part of a 4D spacetime
  */
@@ -65,21 +53,6 @@ struct ADMMetric : BaseMetric<Derived, T, CoordSys>{
 
     void ddx_shift(Tensor<T, Ax<Loc::Dn, 3>, Ax<Loc::Up, 3>>& out, const Coords& x) const{
         static_assert(sizeof(T) == 0, "d_i shift^j(x) not implemented");
-    }
-
-    /// @brief The Lorentz factor in a local frame `u` at point `x`
-    T lfac(const Coords& x, const Vector<T, 3>& u) const {
-        MetricTensor<T, CoordSys> gcov;
-        static_cast<const Derived*>(this)->fill_gcov(gcov, x);
-
-        return adm::lfac(gcov, u);
-    }
-
-    T lfac(const Coords& x, const CoVector<T, 3>& u) const {
-        InverseMetricTensor<T, CoordSys> gcont;
-        static_cast<const Derived*>(this)->fill_gcont(gcont, x);
-
-        return adm::lfac(gcont, u);
     }
 };
 

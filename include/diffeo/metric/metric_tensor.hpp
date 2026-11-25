@@ -116,7 +116,7 @@ struct BaseMetric{
         MetricTensor<T, CoordSys> gcov;
         static_cast<const Derived*>(this)->fill_gcov(gcov, x);
 
-        const Idx<MU> mu; const Idx<NU> nu; const Idx<I> i; const Idx<J> j;
+        const Idx<0> mu; const Idx<1> nu; const Idx<2> i; const Idx<3> j;
 
         // Using the dxdX_T is not necessary, but helps Fastor
         // vectorize the loops
