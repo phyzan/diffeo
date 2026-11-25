@@ -96,45 +96,62 @@ T azimuth(const T y, const T x){
     return phi;
 }
 
-/*
-Solves theta = vartheta + (h/2) sin(2 vartheta) for vartheta. With x = 2 vartheta and epsilon = 2 theta,
-this is f(x) = x + h sin(x) - epsilon = 0, where f' = 1 + h cos(x) >= 1 - |h| > 0 for |h| < 1.
-The root is within |h| of epsilon, because x - epsilon = -h sin(x), so any theta can be given.
-
-Newton's method from x = epsilon, kept inside the bracket [epsilon - |h|, epsilon + |h|], which shrinks
-with every step: a step that would leave it is replaced by bisection. As |f''| <= |h|, the error falls as
-e_{n+1} <= |h|/(2(1 - |h|)) e_n^2, so that a handful of steps reach the machine precision for moderate h.
-Ending on a Newton step also gives the right gradient if T is a Dual: at the root, d(x_{n+1})/d(epsilon)
-= 1/f' whatever the gradient of x_n, as bisection carries none.
-*/
+/// @brief (sin(x), cos(x)) -> (sin(x + d), cos(x + d)), for |d| <= 1
 template<typename T>
-T vartheta_of(const T theta, const auto h){
+void rotate(T& sin_x, T& cos_x, const T& d){
+    const T tol = std::numeric_limits<T>::epsilon();
+    T sin_d = d;
+    T cos_d = 1;
+    T term = d;
+    for (int n = 2; abs(term) > tol && n < 10000; n += 2){
+        term *= -d/n;
+        cos_d += term;
+        term *= d/(n + 1);
+        sin_d += term;
+    }
+    const T tmp = sin_x*cos_d + cos_x*sin_d;
+    cos_x = cos_x*cos_d - sin_x*sin_d;
+    sin_x = tmp;
+}
+
+/// @brief Solves theta = vartheta + (h/2) sin(2 vartheta) for |h| < 1, with Newton's method on delta = 2 (vartheta - theta).
+/// Always converges: limiting the first step to |h| puts it before the root, where the rest approach it monotonically
+template<typename T>
+void solve_vartheta(T& vartheta, T& dtheta, const T& theta, const T& sin_2theta, const T& cos_2theta, const auto h){
     const T tol = 8 * std::numeric_limits<T>::epsilon();
-    const T epsilon = 2*theta;
-    T lo = epsilon - abs(h);
-    T hi = epsilon + abs(h);
-    T x = epsilon;
+    T sin_x = sin_2theta;
+    T cos_x = cos_2theta;
+
+    T step = -h*sin_x/(1 + h*cos_x);
+    if (step > abs(h)){
+        step = abs(h);
+    }
+    else if (step < -abs(h)){
+        step = -abs(h);
+    }
+    T delta = step;
+    rotate(sin_x, cos_x, step);
+
+    int direction = 0;
     for (int i = 0; i < 100; ++i){
-        // x - epsilon first: it is exact while x is within a factor of 2 of epsilon (Sterbenz), so that only
-        // h sin(x) is rounded. (x + h sin(x)) - epsilon would round to ~ulp(epsilon), divided by f' ~ 1 - |h|
-        const T f = (x - epsilon) + h*sin(x);
-        if (f > 0){
-            hi = x;
-        }
-        else{
-            lo = x;
-        }
-        T x_new = x - f/(1 + h*cos(x));
-        if (!(x_new >= lo && x_new <= hi)){ // also when x_new is NaN
-            x_new = (lo + hi)/2;
-        }
-        const T step = x_new - x;
-        x = x_new;
-        if (!(abs(step) > tol)){ // converged, or NaN
+        step = -(delta + h*sin_x)/(1 + h*cos_x);
+        delta += step;
+        rotate(sin_x, cos_x, step);
+        const int sign = (step > 0) ? 1 : -1;
+        if (!(abs(step) > tol) || sign == -direction){ // converged, NaN, or rounding errors
             break;
         }
+        direction = sign;
     }
-    return x/2;
+    vartheta = theta + delta/2;
+    dtheta = 1 + h*cos_x;
+}
+
+template<typename T>
+T vartheta_of(const T theta, const auto h){
+    T vartheta, dtheta;
+    solve_vartheta<T>(vartheta, dtheta, theta, sin(2*theta), cos(2*theta), h);
+    return vartheta;
 }
 } // namespace geom::detail
 
@@ -150,7 +167,7 @@ void get_coords(Coordinates<SKS3D, T>& x_sks, const Coordinates<MKS3D, T>& x_mks
 }
 
 
-/// @brief x_mks(x_sks). vartheta(theta) has no closed form, and is found by bisection
+/// @brief x_mks(x_sks). vartheta(theta) has no closed form, and is found with Newton's method
 template<typename T, typename U>
 void get_coords(Coordinates<MKS3D, T>& x_mks, const Coordinates<SKS3D, T>& x_sks, const U h, const U r0){
     x_mks.s() = log(x_sks.r() - r0);
@@ -337,6 +354,54 @@ void get_dxdX(Jacobian<T, MKS3D, CKS3D>& jac, const Coordinates<CKS3D, T>& x_cks
             jac(i, j) = dmks_dsks(i, i)*dsks_dcks(i, j);
         }
     }
+}
+
+/// @brief x_mks(x_cks) and J = dx_cks/dx_mks, cheaper than separately. Requires r > 0
+template<typename T, typename U>
+void get_coords_and_dxdX(
+    Coordinates<MKS3D, T>& x_mks,
+    Jacobian<T, CKS3D, MKS3D>& jac,
+    const Coordinates<CKS3D, T>& x_cks,
+    const U alpha, const U h, const U r0){
+
+    const T x = x_cks.x();
+    const T y = x_cks.y();
+    const T r = kerr_radius(x_cks, alpha);
+    const T r2_alpha2 = r*r + alpha*alpha;
+    const T sqrt_r2_alpha2 = sqrt(r2_alpha2);
+    const T rho = sqrt(x*x + y*y);
+    const T sin_th = rho/sqrt_r2_alpha2;
+    const T cos_th = x_cks.z()/r;
+    const T theta = atan2(r*rho, sqrt_r2_alpha2*x_cks.z());
+
+    T vartheta, dtheta;
+    detail::solve_vartheta<T>(vartheta, dtheta, theta, 2*sin_th*cos_th, (cos_th - sin_th)*(cos_th + sin_th), h);
+
+    const T exp_s = r - r0;
+    x_mks.s() = log(exp_s);
+    x_mks.vartheta() = vartheta;
+    x_mks.phi_ks() = detail::azimuth(r*y - alpha*x, r*x + alpha*y);
+
+    // (x, y)/sin(theta), with phi_ks = 0 on the axis
+    T u = r;
+    T v = alpha;
+    if (rho > 0){
+        u = sqrt_r2_alpha2*(x/rho);
+        v = sqrt_r2_alpha2*(y/rho);
+    }
+
+    // rows (x, y, z), columns (s, vartheta, phi_ks)
+    jac(0, 0) = (r*x + alpha*y)/r2_alpha2*exp_s;
+    jac(0, 1) = cos_th*u*dtheta;
+    jac(0, 2) = -y;
+
+    jac(1, 0) = (r*y - alpha*x)/r2_alpha2*exp_s;
+    jac(1, 1) = cos_th*v*dtheta;
+    jac(1, 2) = x;
+
+    jac(2, 0) = cos_th*exp_s;
+    jac(2, 1) = -r*sin_th*dtheta;
+    jac(2, 2) = 0;
 }
 
 } // namespace geom

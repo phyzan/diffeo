@@ -27,6 +27,19 @@ T sin_sqr(const T x){
     return sin_x * sin_x;
 }
 
+/// @brief What the equations of motion of a particle need from a 3+1 metric, at its position. See ADMMetric::fill_geometry
+template<typename T, typename CoordSys>
+struct ADMGeometry{
+    InverseMetricTensor<T, CoordSys> gcont;                     // g^ij
+    Tensor<T, Ax<Loc::Dn, 3>, Ax<Loc::Up, 3>> ddx_shift;        // d_i(beta^j)
+    Vector<T, 3> u;                                             // g^ij u_j
+    Vector<T, 3> shift;                                         // beta^i
+    CoVector<T, 3> ddx_lapse;                                   // d_i(lapse)
+    CoVector<T, 3> ddx_gcov_contracted;                         // (d_i g_jk) u^j u^k
+    T lapse;
+    T sqrt_gdet;
+};
+
 /**
  * @brief 3 + 1 split: Interpretes the metric as the spatial part of a 4D spacetime
  */
@@ -53,6 +66,21 @@ struct ADMMetric : BaseMetric<Derived, T, CoordSys>{
 
     void ddx_shift(Tensor<T, Ax<Loc::Dn, 3>, Ax<Loc::Up, 3>>& out, const Coords& x) const{
         static_assert(sizeof(T) == 0, "d_i shift^j(x) not implemented");
+    }
+
+    /// @brief All of ADMGeometry at once, for a covariant vector u_i.
+    /// Override to reduce expensive evaluations
+    void fill_geometry(ADMGeometry<T, CoordSys>& out, const Coords& x, const CoVector<T, 3>& co_u) const {
+        constexpr Idx<0> i; constexpr Idx<1> j;
+        const Derived& metric = *static_cast<const Derived*>(this);
+        metric.fill_gcont(out.gcont, x);
+        out.u(i) = out.gcont(i, j) * co_u(j);
+        metric.shift(out.shift, x);
+        metric.ddx_shift(out.ddx_shift, x);
+        metric.ddx_lapse(out.ddx_lapse, x);
+        metric.ddx_gcov_contracted(out.ddx_gcov_contracted, x, out.u);
+        out.lapse = metric.lapse(x);
+        out.sqrt_gdet = metric.sqrt_gdet(x);
     }
 };
 
@@ -663,6 +691,41 @@ struct KerrCKS3D : ADMMetric<KerrCKS3D<T>, CKS3D, T>{
             for (int j = 0; j < 3; ++j){
                 out(i, j) = dc*l[j] + c*dl[i][j];
             }
+        }
+    }
+
+    /// @brief Same as the functions above, but r, f, l and their derivatives are computed only once
+    void fill_geometry(ADMGeometry<T, CKS3D>& out, const Coords& x, const CoVector<T, 3>& co_u) const {
+        T r, f;
+        std::array<T, 3> l, dr, df;
+        f_and_l(r, f, l, x);
+        ddx_r_and_f(dr, df, r, f, x);
+        std::array<std::array<T, 3>, 3> dl; // dl[i][j] = d_i(l_j)
+        ddx_l(dl, r, l, dr, x);
+
+        const T one_f = 1 + f;
+        const T c = f/one_f;
+        out.sqrt_gdet = sqrt(one_f);
+        out.lapse = 1/out.sqrt_gdet;
+
+        const T l_co_u = l[0]*co_u(0) + l[1]*co_u(1) + l[2]*co_u(2);
+        for (int i = 0; i < 3; ++i){
+            out.u(i) = co_u(i) - c*l_co_u*l[i];
+        }
+        const T lu = l[0]*out.u(0) + l[1]*out.u(1) + l[2]*out.u(2);
+
+        const T dlapse_df = -out.lapse/(2*one_f);
+        const T dc_df = 1/(one_f*one_f);
+        for (int i = 0; i < 3; ++i){
+            out.shift(i) = c*l[i];
+            out.ddx_lapse(i) = dlapse_df*df[i];
+            const T dl_u = dl[i][0]*out.u(0) + dl[i][1]*out.u(1) + dl[i][2]*out.u(2);
+            out.ddx_gcov_contracted(i) = df[i]*lu*lu + 2*f*lu*dl_u;
+            for (int j = 0; j < 3; ++j){
+                out.gcont(i, j) = -c*l[i]*l[j];
+                out.ddx_shift(i, j) = dc_df*df[i]*l[j] + c*dl[i][j];
+            }
+            out.gcont(i, i) += 1;
         }
     }
 
